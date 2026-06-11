@@ -111,6 +111,14 @@ type SessionPicker = {
   projectSelectedIndex: number
 }
 
+type WelcomeAnimationMode = 'chew' | 'escape' | 'done'
+
+type WelcomeAnimation = {
+  entryId: number
+  mode: WelcomeAnimationMode
+  frameIndex: number
+}
+
 type ScreenState = {
   input: string
   cursorOffset: number
@@ -136,6 +144,7 @@ type ScreenState = {
   mouseDown: { x: number; y: number } | null
   transcriptBodyStartY: number
   transcriptBodyLines: number
+  welcomeAnimation: WelcomeAnimation | null
 }
 
 type TranscriptEntryDraft =
@@ -143,6 +152,74 @@ type TranscriptEntryDraft =
   | Omit<Extract<TranscriptEntry, { kind: 'assistant' }>, 'id'>
   | Omit<Extract<TranscriptEntry, { kind: 'progress' }>, 'id'>
   | Omit<Extract<TranscriptEntry, { kind: 'tool' }>, 'id'>
+
+export const WELCOME_CHEW_FRAMES = [
+  String.raw`       (\__/)     
+       (='.'=)    
+       / >[cheese]`,
+  String.raw`       (\__/)     
+       (=-.-=)    
+       / >[cheese]`,
+  String.raw`       (\__/)     
+       (='o'=)    
+       / >>[heese]`,
+  String.raw`       (\__/)    
+       (='3'=) . 
+       / >>[eese]`,
+  String.raw`       (\__/)   
+       (='o'=) .
+       / >>[ese]`,
+  String.raw`       (\__/)   
+       (='3'=) *
+       / >>[se] `,
+  String.raw`       (\__/)   
+       (='o'=) *
+       / >>[e]  `,
+  String.raw`       (\__/)   
+       (=^.^=) *
+       / >>[]   `,
+  String.raw`       (\__/)   
+       (=^.^=) *
+       / >[]    `,
+]
+
+export const WELCOME_ESCAPE_FRAMES = [
+  String.raw`       (\__/)   
+       (='o'=) !
+       / >[]    `,
+  String.raw`       (\__/)    
+       (='O'=) !!
+       / \[]/    `,
+  String.raw`       (\__/)  
+      \(='O'=)/
+        /  \   `,
+  String.raw`       (\__/) 
+       (='o'=)
+      _/    \_`,
+  String.raw`        \__/  
+       (='o'=)
+      _/    \_`,
+  String.raw`        \_/   
+       (='o'=)
+      _/    \_`,
+  String.raw`         _   
+       _/ \_ 
+      (_   _)`,
+  String.raw`            
+       _..-'
+      '---. `,
+  String.raw`        ... 
+       .   .
+            `,
+  String.raw`         .  
+            
+            `,
+  String.raw`            
+            
+            `,
+]
+
+const WELCOME_MESSAGE = 'Welcome back!~'
 
 function formatRelativeTime(timestamp: number): string {
   const seconds = Math.floor((Date.now() - timestamp) / 1000)
@@ -423,6 +500,88 @@ function pushTranscriptEntry(
   const id = state.nextEntryId++
   state.transcript.push({ id, ...entry })
   return id
+}
+
+export function normalizeAsciiFrame(frame: string): string {
+  const lines = frame.split('\n')
+  const width = Math.max(...lines.map(line => line.length))
+  return lines.map(line => line.padEnd(width, ' ')).join('\n')
+}
+
+export function renderWelcomeBody(frame: string): string {
+  return `${WELCOME_MESSAGE}\n${normalizeAsciiFrame(frame)}`
+}
+
+function updateAssistantEntryBody(
+  state: ScreenState,
+  entryId: number,
+  body: string,
+): void {
+  const entry = state.transcript.find(
+    item => item.id === entryId && item.kind === 'assistant',
+  )
+  if (!entry || entry.kind !== 'assistant') {
+    return
+  }
+  entry.body = body
+}
+
+export function pushWelcomeAnimation(state: ScreenState): void {
+  const entryId = pushTranscriptEntry(state, {
+    kind: 'assistant',
+    body: renderWelcomeBody(WELCOME_CHEW_FRAMES[0] ?? ''),
+  })
+  state.welcomeAnimation = {
+    entryId,
+    mode: 'chew',
+    frameIndex: 0,
+  }
+}
+
+export function startWelcomeEscapeAnimation(state: ScreenState): boolean {
+  const animation = state.welcomeAnimation
+  if (!animation || animation.mode === 'escape' || animation.mode === 'done') {
+    return false
+  }
+
+  animation.mode = 'escape'
+  animation.frameIndex = 0
+  updateAssistantEntryBody(
+    state,
+    animation.entryId,
+    renderWelcomeBody(WELCOME_ESCAPE_FRAMES[0] ?? ''),
+  )
+  return true
+}
+
+export function advanceWelcomeAnimation(state: ScreenState): boolean {
+  const animation = state.welcomeAnimation
+  if (!animation || animation.mode === 'done' || state.transcriptScrollOffset > 0) {
+    return false
+  }
+
+  const frames =
+    animation.mode === 'escape' ? WELCOME_ESCAPE_FRAMES : WELCOME_CHEW_FRAMES
+  if (frames.length === 0) {
+    animation.mode = 'done'
+    return false
+  }
+
+  if (animation.mode === 'chew') {
+    animation.frameIndex = (animation.frameIndex + 1) % frames.length
+  } else if (animation.frameIndex < frames.length - 1) {
+    animation.frameIndex += 1
+  } else {
+    state.welcomeAnimation = null
+    return false
+  }
+
+  updateAssistantEntryBody(
+    state,
+    animation.entryId,
+    renderWelcomeBody(frames[animation.frameIndex] ?? frames[0] ?? ''),
+  )
+  return true
 }
 
 function updateToolEntry(
@@ -1210,6 +1369,7 @@ async function handleInput(
     body: input,
   })
   state.transcriptScrollOffset = 0
+  startWelcomeEscapeAnimation(state)
   setStatus(state, 'Thinking...')
   state.isBusy = true
   rerender()
@@ -1509,6 +1669,7 @@ export async function runTtyApp(args: TtyAppArgs): Promise<void> {
     mouseDown: null,
     transcriptBodyStartY: 0,
     transcriptBodyLines: 20,
+    welcomeAnimation: null,
   }
   state.historyIndex = state.history.length
 
@@ -1533,6 +1694,8 @@ export async function runTtyApp(args: TtyAppArgs): Promise<void> {
   ) {
     await refreshSystemPrompt(permissionArgs)
   }
+
+  pushWelcomeAnimation(state)
 
   // Show loaded instruction files at startup
   const memoryFiles = await discoverInstructionFiles(args.cwd)
@@ -1591,6 +1754,11 @@ export async function runTtyApp(args: TtyAppArgs): Promise<void> {
       state.statusAnimationFrame = (state.statusAnimationFrame + 1) % 3
       scheduleRender()
     }, 1000)
+    const welcomeAnimationTimer = setInterval(() => {
+      if (advanceWelcomeAnimation(state)) {
+        scheduleRender()
+      }
+    }, 200)
     const inputHintTimer = setInterval(() => {
       state.inputHintFrame = (state.inputHintFrame + 1) % 2
       if (!state.input) {
@@ -1600,6 +1768,7 @@ export async function runTtyApp(args: TtyAppArgs): Promise<void> {
 
     const cleanup = () => {
       clearInterval(statusAnimationTimer)
+      clearInterval(welcomeAnimationTimer)
       clearInterval(inputHintTimer)
       process.stdin.off('data', onData)
       process.stdin.off('end', onEnd)
