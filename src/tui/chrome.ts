@@ -1,5 +1,4 @@
 import type { BackgroundTaskResult } from '../tool.js'
-import path from 'node:path'
 import process from 'node:process'
 import type { RuntimeConfig } from '../config.js'
 import type { SlashCommand } from '../cli-commands.js'
@@ -77,35 +76,6 @@ function padPlain(input: string, width: number): string {
   return visible >= width ? input : `${input}${' '.repeat(width - visible)}`
 }
 
-function truncatePathMiddle(input: string, width: number): string {
-  if (width <= 0 || stringDisplayWidth(input) <= width) return input
-  if (width <= 5) return truncatePlain(input, width)
-
-  const keep = width - 3
-  const leftTarget = Math.ceil(keep / 2)
-  const rightTarget = Math.floor(keep / 2)
-
-  let left = ''
-  let leftWidth = 0
-  for (const char of [...input]) {
-    const next = charDisplayWidth(char)
-    if (leftWidth + next > leftTarget) break
-    left += char
-    leftWidth += next
-  }
-
-  let right = ''
-  let rightWidth = 0
-  for (const char of [...input].reverse()) {
-    const next = charDisplayWidth(char)
-    if (rightWidth + next > rightTarget) break
-    right = `${char}${right}`
-    rightWidth += next
-  }
-
-  return `${left}...${right}`
-}
-
 function colorBadge(
   label: string,
   value: string,
@@ -159,7 +129,7 @@ function panelRow(left: string, width: number, right?: string): string {
   const rightText = right ?? ''
   const leftWidth = stringDisplayWidth(left)
   const rightWidth = stringDisplayWidth(rightText)
-  const gap = Math.max(1, inner - leftWidth - rightWidth)
+  const gap = rightText ? Math.max(1, inner - leftWidth - rightWidth) : 0
   const leftText =
     leftWidth + rightWidth + gap > inner
       ? truncatePlain(left, Math.max(0, inner - rightWidth - 1))
@@ -204,26 +174,38 @@ export function renderPanel(
   options: {
     rightTitle?: string
     minBodyLines?: number
+    showTitle?: boolean
+    frame?: boolean
   } = {},
 ): string {
   const width = Math.max(60, process.stdout.columns ?? 100)
   const bodyLines = body.length > 0 ? body.split('\n') : []
   const renderedLines = bodyLines.flatMap(line => wrapPanelBodyLine(line, width))
   const minBodyLines = options.minBodyLines ?? 0
+  const showFrame = options.frame ?? true
+  const showTitle = options.showTitle ?? true
   while (renderedLines.length < minBodyLines) {
     renderedLines.push('')
   }
 
+  if (!showFrame) {
+    return renderedLines.join('\n')
+  }
+
   return [
     borderLine('top', width),
-    panelRow(
-      `${BRIGHT_CYAN}${BOLD}${title}${RESET}`,
-      width,
-      options.rightTitle
-        ? `${DIM}${truncatePlain(options.rightTitle, Math.max(10, Math.floor(width * 0.3)))}${RESET}`
-        : undefined,
-    ),
-    emptyPanelRow(width),
+    ...(showTitle
+      ? [
+          panelRow(
+            `${BRIGHT_CYAN}${BOLD}${title}${RESET}`,
+            width,
+            options.rightTitle
+              ? `${DIM}${truncatePlain(options.rightTitle, Math.max(10, Math.floor(width * 0.3)))}${RESET}`
+              : undefined,
+          ),
+          emptyPanelRow(width),
+        ]
+      : []),
     ...renderedLines.map(line => panelRow(line, width)),
     borderLine('bottom', width),
   ].join('\n')
@@ -266,8 +248,8 @@ export function renderContextBadge(stats: {
 
 export function renderBanner(
   runtime: RuntimeConfig | null,
-  cwd: string,
-  permissionSummary: string[],
+  _cwd: string,
+  _permissionSummary: string[],
   session: {
     transcriptCount: number
     messageCount: number
@@ -289,17 +271,10 @@ export function renderBanner(
 ): string {
   const panelWidth = Math.max(60, process.stdout.columns ?? 100)
   const panelInner = Math.max(0, panelWidth - 4)
-  const cwdName = path.basename(cwd) || cwd
   const model = runtime?.model ?? 'not-configured'
   const provider = runtime?.baseUrl
     ? runtime.baseUrl.replace(/^https?:\/\//, '').split('/')[0] || 'custom'
     : 'offline'
-  const pathBudget = Math.max(20, panelInner - 28)
-  const projectLine = `${BLUE}${BOLD}${truncatePlain(cwdName, 24)}${RESET} ${DIM}${truncatePathMiddle(cwd, pathBudget)}${RESET}`
-  const permissionLine =
-    permissionSummary.length > 0
-      ? `${DIM}${truncatePlain(permissionSummary.join(' | '), Math.max(24, panelInner))}${RESET}`
-      : `${DIM}permissions: ask on sensitive actions${RESET}`
   const metaBadges = [
     colorBadge('session', 'local', BRIGHT_YELLOW),
     colorBadge('provider', provider, CYAN),
@@ -324,21 +299,31 @@ export function renderBanner(
 
   return renderPanel(
     'MiniCode',
-    [
-      `${DIM}Terminal coding assistant with a card-style session layout.${RESET}`,
-      '',
-      projectLine,
-      metaLine,
-      permissionLine,
-    ].join('\n'),
+    metaLine,
     {
       rightTitle: provider,
     },
   )
 }
 
-export function renderStatusLine(status: string | null): string {
-  if (!status) return `${DIM}Ready${RESET}`
+export function renderPermissionSummaryLine(permissionSummary: string[]): string {
+  const width = Math.max(60, process.stdout.columns ?? 100)
+  const line =
+    permissionSummary.length > 0
+      ? permissionSummary.map(part => part.replace(/^cwd:\s*/, '')).join(' | ')
+      : 'permissions: ask on sensitive actions'
+  return `${DIM}${truncatePlain(line, width)}${RESET}`
+}
+
+function renderStatusDots(animationFrame = 0): string {
+  return '.'.repeat((Math.max(0, animationFrame) % 3) + 1)
+}
+
+export function renderStatusLine(status: string | null, animationFrame = 0): string {
+  if (!status) return `${DIM}Ready${renderStatusDots(animationFrame)}${RESET}`
+  if (status === 'Thinking...') {
+    return `${YELLOW}${BOLD}Thinking${RESET}`
+  }
   return `${YELLOW}${BOLD}${status}${RESET}`
 }
 
@@ -388,9 +373,12 @@ export function renderFooterBar(
   },
   backgroundTasks: BackgroundTaskResult[] = [],
   compressionStatus?: string | null,
+  statusAnimationFrame = 0,
+  leftOverride?: string,
+  rightPrefix?: string,
 ): string {
   const width = Math.max(60, process.stdout.columns ?? 100)
-  const left = renderStatusLine(status)
+  const left = leftOverride ?? renderStatusLine(status, statusAnimationFrame)
   const runningBackground = backgroundTasks.filter(task => task.status === 'running')
   const backgroundSummary =
     runningBackground.length > 0
@@ -407,7 +395,7 @@ export function renderFooterBar(
   const compressionPart = compressionStatus
     ? `${DIM}|${RESET} ${YELLOW}${compressionStatus}${RESET}`
     : ''
-  const right = `${DIM}tools${RESET} ${toolsEnabled ? `${GREEN}on${RESET}` : `${RED}off${RESET}`} ${DIM}|${RESET} ${DIM}skills${RESET} ${skillsEnabled ? `${GREEN}on${RESET}` : `${RED}off${RESET}`} ${DIM}|${RESET} ${mcpSummary}${backgroundSummary}${compressionPart}`
+  const right = `${rightPrefix ? `${rightPrefix} ${DIM}|${RESET} ` : ''}${DIM}tools${RESET} ${toolsEnabled ? `${GREEN}on${RESET}` : `${RED}off${RESET}`} ${DIM}|${RESET} ${DIM}skills${RESET} ${skillsEnabled ? `${GREEN}on${RESET}` : `${RED}off${RESET}`} ${DIM}|${RESET} ${mcpSummary}${backgroundSummary}${compressionPart}`
   const gap = Math.max(1, width - stripAnsi(left).length - stripAnsi(right).length)
   return `${left}${' '.repeat(gap)}${right}`
 }

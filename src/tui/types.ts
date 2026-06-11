@@ -8,6 +8,7 @@ export type TranscriptEntry =
       id: number
       kind: 'assistant'
       body: string
+      workedForSeconds?: number
     }
   | {
       id: number

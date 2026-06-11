@@ -1,5 +1,5 @@
 import process from 'node:process'
-import { charDisplayWidth, wrapPanelBodyLine } from './chrome.js'
+import { charDisplayWidth, stringDisplayWidth, wrapPanelBodyLine } from './chrome.js'
 import { renderMarkdownish } from './markdown.js'
 import type { TranscriptEntry } from './types.js'
 
@@ -13,6 +13,7 @@ const MAGENTA = '[35m'
 const BOLD = '[1m'
 const BLUE = '[34m'
 const REVERSE = '[7m'
+const USER_MESSAGE_BG = '[48;5;236m'
 
 export type TranscriptSelection = {
   startLine: number
@@ -115,6 +116,22 @@ function indentBlock(input: string, prefix = '  '): string {
     .join('\n')
 }
 
+function renderUserBodyLine(line: string, width: number): string {
+  const padding = Math.max(0, width - stringDisplayWidth(line))
+  return `${USER_MESSAGE_BG}${line}${' '.repeat(padding)}${RESET}`
+}
+
+function renderUserBody(body: string): string {
+  const panelWidth = getTranscriptPanelWidth()
+  const bodyWidth = Math.max(0, panelWidth - 4)
+  return body
+    .split('\n')
+    .map(line => `> ${line}`)
+    .flatMap(line => wrapPanelBodyLine(line, panelWidth))
+    .map(line => renderUserBodyLine(line, bodyWidth))
+    .join('\n')
+}
+
 function previewToolBody(toolName: string, body: string): string {
   const maxChars = toolName === 'read_file' ? 1000 : 1800
   const maxLines = toolName === 'read_file' ? 20 : 36
@@ -133,15 +150,26 @@ function previewToolBody(toolName: string, body: string): string {
   return limited
 }
 
+function renderWorkedForDivider(seconds: number): string {
+  const width = Math.max(60, process.stdout.columns ?? 100)
+  const inner = Math.max(0, width - 4)
+  const label = `Worked for ${Math.max(0, seconds)}s`
+  const labelWidth = stringDisplayWidth(label)
+  return `${' '.repeat(Math.max(0, inner - labelWidth))}${label}`
+}
+
 function renderTranscriptEntry(entry: TranscriptEntry): string {
   if (entry.kind === 'user') {
-    return `${CYAN}${BOLD}you${RESET}\n${indentBlock(entry.body)}`
+    return `${CYAN}${BOLD}you${RESET}\n${renderUserBody(entry.body)}`
   }
 
   if (entry.kind === 'assistant') {
-    return `${GREEN}${BOLD}assistant${RESET}\n${indentBlock(
+    const header = `${GREEN}${BOLD}Minicode${RESET}\n${indentBlock(
       renderMarkdownish(entry.body),
     )}`
+    return entry.workedForSeconds === undefined
+      ? header
+      : `${header}\n${renderWorkedForDivider(entry.workedForSeconds)}`
   }
 
   if (entry.kind === 'progress') {
@@ -188,9 +216,7 @@ export function renderTranscriptLines(entries: TranscriptEntry[]): string[] {
 
   rendered.forEach((block, index) => {
     if (index > 0) {
-      logicalLines.push('')
       logicalLines.push(separator)
-      logicalLines.push('')
     }
 
     logicalLines.push(...block.split('\n'))

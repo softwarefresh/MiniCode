@@ -36,7 +36,6 @@ import type { SessionMeta, ProjectMeta } from './session.js'
 import { spawn } from 'node:child_process'
 import { parseInputChunk, type ParsedInputEvent } from './tui/input-parser.js'
 import {
-  clearScreen,
   enterAlternateScreen,
   exitAlternateScreen,
   getPermissionPromptMaxScrollOffset,
@@ -46,8 +45,10 @@ import {
   renderInputPrompt,
   renderPanel,
   renderPermissionPrompt,
+  renderPermissionSummaryLine,
   renderSlashMenu,
   renderStatusLine,
+  renderTerminalFrame,
   renderToolPanel,
   renderTranscript,
   getTranscriptMaxScrollOffset,
@@ -128,6 +129,9 @@ type ScreenState = {
   isBusy: boolean
   contextStats: ContextStats | null
   compressionStatus: string | null
+  statusAnimationFrame: number
+  inputHintFrame: number
+  thinkingStartedAt: number | null
   selection: TranscriptSelection | null
   mouseDown: { x: number; y: number } | null
   transcriptBodyStartY: number
@@ -183,7 +187,7 @@ function renderHeaderPanel(args: TtyAppArgs, state: ScreenState): string {
 function renderPromptPanel(state: ScreenState): string {
   const commands = getVisibleCommands(state.input)
   const promptBody = [
-    renderInputPrompt(state.input, state.cursorOffset),
+    renderInputPrompt(state.input, state.cursorOffset, state.inputHintFrame),
     commands.length > 0
       ? `\n${renderSlashMenu(
           commands,
@@ -191,7 +195,29 @@ function renderPromptPanel(state: ScreenState): string {
         )}`
       : '',
   ].join('')
-  return renderPanel('prompt', promptBody)
+  return renderPanel('prompt', promptBody, { showTitle: false })
+}
+
+function renderPermissionSummary(args: TtyAppArgs): string {
+  return renderPermissionSummaryLine(args.permissions.getSummary())
+}
+
+function setStatus(state: ScreenState, status: string | null): void {
+  state.status = status
+  if (status === 'Thinking...') {
+    state.thinkingStartedAt ??= Date.now()
+  } else {
+    state.thinkingStartedAt = null
+  }
+}
+
+function renderFooterStatus(state: ScreenState): string {
+  if (state.status === 'Thinking...') {
+    const startedAt = state.thinkingStartedAt ?? Date.now()
+    const seconds = Math.max(0, Math.floor((Date.now() - startedAt) / 1000))
+    return `\u001b[33m\u001b[1mThinking(${seconds}s)\u001b[0m`
+  }
+  return renderStatusLine(state.status, state.statusAnimationFrame)
 }
 
 function getTranscriptBodyLines(args: TtyAppArgs, state: ScreenState): number {
@@ -199,8 +225,8 @@ function getTranscriptBodyLines(args: TtyAppArgs, state: ScreenState): number {
   const headerLines = renderHeaderPanel(args, state).split('\n').length
   const promptLines = renderPromptPanel(state).split('\n').length
   const footerLines = 1
-  const gapsBetweenSections = 3
-  const transcriptPanelFrameLines = 4
+  const gapsBetweenSections = 2
+  const transcriptPanelFrameLines = 0
   const remaining =
     rows -
     headerLines -
@@ -458,7 +484,7 @@ function finalizeDanglingRunningTools(state: ScreenState): void {
   }
   if (runningEntries.length > 0) {
     state.activeTool = null
-    state.status = `Previous turn ended with ${runningEntries.length} unfinished tool call(s).`
+    setStatus(state, `Previous turn ended with ${runningEntries.length} unfinished tool call(s).`)
   }
 }
 
@@ -555,15 +581,15 @@ function extractPathFromToolInput(input: unknown): string | null {
 
 function renderScreen(args: TtyAppArgs, state: ScreenState): void {
   const backgroundTasks = listBackgroundTasks()
-  clearScreen()
+  const frame: string[] = []
   const headerPanel = renderHeaderPanel(args, state)
-  console.log(headerPanel)
-  console.log('')
+  frame.push(headerPanel)
+  frame.push('')
   state.transcriptBodyStartY = headerPanel.split('\n').length + 4
   state.transcriptBodyLines = getTranscriptBodyLines(args, state)
 
   if (state.pendingApproval) {
-    console.log(
+    frame.push(
       renderPanel('approval', renderPermissionPrompt(state.pendingApproval.request, {
         expanded: state.pendingApproval.detailsExpanded,
         scrollOffset: state.pendingApproval.detailsScrollOffset,
@@ -572,10 +598,10 @@ function renderScreen(args: TtyAppArgs, state: ScreenState): void {
         feedbackInput: state.pendingApproval.feedbackInput,
       })),
     )
-    console.log('')
-    console.log(renderPanel('activity', renderToolPanel(state.activeTool, state.recentTools, backgroundTasks)))
-    console.log('')
-    console.log(
+    frame.push('')
+    frame.push(renderPanel('activity', renderToolPanel(state.activeTool, state.recentTools, backgroundTasks)))
+    frame.push('')
+    frame.push(
       renderFooterBar(
         state.status,
         true,
@@ -583,8 +609,10 @@ function renderScreen(args: TtyAppArgs, state: ScreenState): void {
         summarizeMcpServers(args.tools.getMcpServers()),
         backgroundTasks,
         state.compressionStatus,
+        state.statusAnimationFrame,
       ),
     )
+    renderTerminalFrame(frame.join('\n'))
     return
   }
 
@@ -597,7 +625,7 @@ function renderScreen(args: TtyAppArgs, state: ScreenState): void {
         return `${marker}${p.dir}  ${p.sessionCount} sessions  ${ago}`
       })
       const body = `All projects:\n\n${lines.join('\n')}\n\nEnter to see info, Tab to go back, Esc to cancel`
-      console.log(renderPanel('projects', body))
+      frame.push(renderPanel('projects', body))
     } else {
       const lines = state.sessionPicker.sessions.map((s, i) => {
         const marker = i === state.sessionPicker!.selectedIndex ? ' > ' : '   '
@@ -607,10 +635,10 @@ function renderScreen(args: TtyAppArgs, state: ScreenState): void {
         return `${marker}${s.id}${title}  ${s.messageCount} messages  ${ago}${deleteTag}`
       })
       const body = `Select a session to resume:\n\n${lines.join('\n')}\n\n↑/↓ to select, Enter to resume, d to delete, Tab for all projects, Esc to cancel`
-      console.log(renderPanel('sessions', body))
+      frame.push(renderPanel('sessions', body))
     }
-    console.log('')
-    console.log(
+    frame.push('')
+    frame.push(
       renderFooterBar(
         state.status,
         true,
@@ -618,12 +646,14 @@ function renderScreen(args: TtyAppArgs, state: ScreenState): void {
         summarizeMcpServers(args.tools.getMcpServers()),
         backgroundTasks,
         state.compressionStatus,
+        state.statusAnimationFrame,
       ),
     )
+    renderTerminalFrame(frame.join('\n'))
     return
   }
 
-  console.log(
+  frame.push(
     renderPanel(
       'session feed',
       state.transcript.length > 0
@@ -633,18 +663,15 @@ function renderScreen(args: TtyAppArgs, state: ScreenState): void {
             getTranscriptBodyLines(args, state),
             state.selection ?? undefined,
           )
-        : `${renderStatusLine(null)}\n\nType /help for commands.`,
+        : '',
       {
-        rightTitle: `${state.transcript.length} events`,
         minBodyLines: getTranscriptBodyLines(args, state),
+        frame: false,
       },
     ),
   )
-  console.log('')
-  console.log(renderPromptPanel(state))
-
-  console.log('')
-  console.log(
+  frame.push(renderPromptPanel(state))
+  frame.push(
     renderFooterBar(
       state.status,
       true,
@@ -652,8 +679,25 @@ function renderScreen(args: TtyAppArgs, state: ScreenState): void {
       summarizeMcpServers(args.tools.getMcpServers()),
       backgroundTasks,
       state.compressionStatus,
+      state.statusAnimationFrame,
+      renderPermissionSummary(args),
+      renderFooterStatus(state),
     ),
   )
+  renderTerminalFrame(frame.join('\n'))
+}
+
+function createRenderScheduler(renderNow: () => void): () => void {
+  let scheduled: NodeJS.Immediate | null = null
+
+  return () => {
+    if (scheduled) return
+
+    scheduled = setImmediate(() => {
+      scheduled = null
+      renderNow()
+    })
+  }
 }
 
 async function refreshSystemPrompt(args: TtyAppArgs): Promise<void> {
@@ -700,7 +744,7 @@ async function executeToolShortcut(
   rerender: () => void,
 ): Promise<void> {
   state.isBusy = true
-  state.status = `Running ${toolName}...`
+  setStatus(state, `Running ${toolName}...`)
   state.activeTool = toolName
   const entryId = pushTranscriptEntry(state, {
     kind: 'tool',
@@ -739,7 +783,7 @@ async function executeToolShortcut(
     state.activeTool = null
     finalizeDanglingRunningTools(state)
     if (getRunningToolEntries(state).length === 0) {
-      state.status = null
+      setStatus(state, null)
     }
   }
 }
@@ -807,9 +851,12 @@ async function handleInput(
   submittedRawInput?: string,
 ): Promise<boolean> {
   if (state.isBusy) {
-    state.status = state.activeTool
-      ? `Running ${state.activeTool}...`
-      : 'Current turn is still running...'
+    setStatus(
+      state,
+      state.activeTool
+        ? `Running ${state.activeTool}...`
+        : 'Current turn is still running...',
+    )
     return false
   }
 
@@ -829,7 +876,7 @@ async function handleInput(
     }
 
     state.isBusy = true
-    state.status = 'Collapsing context...'
+    setStatus(state, 'Collapsing context...')
     state.compressionStatus = 'collapsing...'
     rerender()
     try {
@@ -872,7 +919,7 @@ async function handleInput(
       })
     } finally {
       state.isBusy = false
-      state.status = null
+      setStatus(state, null)
       state.transcriptScrollOffset = 0
       setTimeout(() => {
         state.compressionStatus = null
@@ -937,7 +984,7 @@ async function handleInput(
       return false
     }
     state.isBusy = true
-    state.status = 'Compressing context...'
+    setStatus(state, 'Compressing context...')
     state.compressionStatus = 'compressing...'
     rerender()
     try {
@@ -981,7 +1028,7 @@ async function handleInput(
       })
     } finally {
       state.isBusy = false
-      state.status = null
+      setStatus(state, null)
       state.transcriptScrollOffset = 0
       // Clear compression status after a delay (will be reset on next render cycle)
       setTimeout(() => {
@@ -1032,12 +1079,12 @@ async function handleInput(
           projects: [],
           projectSelectedIndex: 0,
         }
-        state.status = 'Select a session to resume'
+        setStatus(state, 'Select a session to resume')
         rerender()
       })
 
       state.sessionPicker = null
-      state.status = null
+      setStatus(state, null)
       rerender()
 
       if (!selectedId) return false
@@ -1163,13 +1210,14 @@ async function handleInput(
     body: input,
   })
   state.transcriptScrollOffset = 0
-  state.status = 'Thinking...'
+  setStatus(state, 'Thinking...')
   state.isBusy = true
   rerender()
 
   const pendingToolEntries = new Map<string, number[]>()
   const aggregatedEditByKey = new Map<string, AggregatedEditProgress>()
   const aggregatedEditByEntryId = new Map<number, AggregatedEditProgress>()
+  const turnStartedAt = Date.now()
 
   args.permissions.beginTurn()
   try {
@@ -1238,10 +1286,14 @@ async function handleInput(
           rerender()
         }, 5000)
       },
-      onAssistantMessage(content) {
+      onAssistantMessage(content, metadata) {
+        const workedForSeconds = metadata?.final
+          ? Math.max(0, Math.floor((Date.now() - turnStartedAt) / 1000))
+          : undefined
         pushTranscriptEntry(state, {
           kind: 'assistant',
           body: content,
+          ...(workedForSeconds === undefined ? {} : { workedForSeconds }),
         })
         state.transcriptScrollOffset = 0
         rerender()
@@ -1255,7 +1307,7 @@ async function handleInput(
         rerender()
       },
       onToolStart(toolName, toolInput) {
-        state.status = `Running ${toolName}...`
+        setStatus(state, `Running ${toolName}...`)
         state.activeTool = toolName
         let entryId: number
         const targetPath = extractPathFromToolInput(toolInput)
@@ -1374,7 +1426,7 @@ async function handleInput(
           })
         }
         state.activeTool = null
-        state.status = 'Thinking...'
+        setStatus(state, 'Thinking...')
         rerender()
       },
     })
@@ -1400,7 +1452,7 @@ async function handleInput(
 
   finalizeDanglingRunningTools(state)
   if (getRunningToolEntries(state).length === 0) {
-    state.status = null
+    setStatus(state, null)
   }
   return false
 }
@@ -1420,7 +1472,7 @@ function createPermissionPromptHandler(
         feedbackMode: false,
         feedbackInput: '',
       }
-      state.status = 'Waiting for approval...'
+      setStatus(state, 'Waiting for approval...')
       rerender()
     })
 }
@@ -1450,6 +1502,9 @@ export async function runTtyApp(args: TtyAppArgs): Promise<void> {
     isBusy: false,
     contextStats: null,
     compressionStatus: null,
+    statusAnimationFrame: 0,
+    inputHintFrame: 0,
+    thinkingStartedAt: null,
     selection: null,
     mouseDown: null,
     transcriptBodyStartY: 0,
@@ -1465,9 +1520,12 @@ export async function runTtyApp(args: TtyAppArgs): Promise<void> {
       args.contextCollapseState ?? createContextCollapseState(),
     permissions: new PermissionManager(
       args.cwd,
-      createPermissionPromptHandler(state, () => renderScreen(permissionArgs, state)),
+      createPermissionPromptHandler(state, () => scheduleRender()),
     ),
   }
+  const renderNow = () => renderScreen(permissionArgs, state)
+  let scheduleRender = renderNow
+  scheduleRender = createRenderScheduler(renderNow)
   await permissionArgs.permissions.whenReady()
   if (
     permissionArgs.messages.length === 0 ||
@@ -1501,7 +1559,7 @@ export async function runTtyApp(args: TtyAppArgs): Promise<void> {
       await handleInput(
         permissionArgs,
         state,
-        () => renderScreen(permissionArgs, state),
+        scheduleRender,
         `/resume ${permissionArgs.resumeTarget}`,
       )
     }
@@ -1522,15 +1580,27 @@ export async function runTtyApp(args: TtyAppArgs): Promise<void> {
     }
   }
 
-  renderScreen(permissionArgs, state)
+  renderNow()
 
   await new Promise<void>(resolve => {
     let finished = false
     let inputRemainder = ''
     let eventChain = Promise.resolve()
     let submitInFlight = false
+    const statusAnimationTimer = setInterval(() => {
+      state.statusAnimationFrame = (state.statusAnimationFrame + 1) % 3
+      scheduleRender()
+    }, 1000)
+    const inputHintTimer = setInterval(() => {
+      state.inputHintFrame = (state.inputHintFrame + 1) % 2
+      if (!state.input) {
+        scheduleRender()
+      }
+    }, 3000)
 
     const cleanup = () => {
+      clearInterval(statusAnimationTimer)
+      clearInterval(inputHintTimer)
       process.stdin.off('data', onData)
       process.stdin.off('end', onEnd)
       process.stdin.off('close', onClose)
@@ -1555,7 +1625,7 @@ export async function runTtyApp(args: TtyAppArgs): Promise<void> {
         if (state.pendingApproval) {
           if (event.kind === 'text' && event.ctrl && event.text === 'o') {
             if (togglePendingApprovalExpand(state)) {
-              renderScreen(permissionArgs, state)
+              scheduleRender()
             }
             return
           }
@@ -1571,49 +1641,49 @@ export async function runTtyApp(args: TtyAppArgs): Promise<void> {
                 ? scrollPendingApprovalBy(state, -3)
                 : scrollPendingApprovalBy(state, 3)
             ) {
-              renderScreen(permissionArgs, state)
+              scheduleRender()
             }
             return
           }
 
           if (event.kind === 'key' && event.name === 'pageup') {
             if (scrollPendingApprovalBy(state, -8)) {
-              renderScreen(permissionArgs, state)
+              scheduleRender()
             }
             return
           }
 
           if (event.kind === 'key' && event.name === 'pagedown') {
             if (scrollPendingApprovalBy(state, 8)) {
-              renderScreen(permissionArgs, state)
+              scheduleRender()
             }
             return
           }
 
           if (event.kind === 'key' && event.name === 'up' && event.meta) {
             if (scrollPendingApprovalBy(state, -1)) {
-              renderScreen(permissionArgs, state)
+              scheduleRender()
             }
             return
           }
 
           if (event.kind === 'key' && event.name === 'down' && event.meta) {
             if (scrollPendingApprovalBy(state, 1)) {
-              renderScreen(permissionArgs, state)
+              scheduleRender()
             }
             return
           }
 
           if (event.kind === 'key' && event.name === 'up' && !event.meta) {
             if (movePendingApprovalSelection(state, -1)) {
-              renderScreen(permissionArgs, state)
+              scheduleRender()
             }
             return
           }
 
           if (event.kind === 'key' && event.name === 'down' && !event.meta) {
             if (movePendingApprovalSelection(state, 1)) {
-              renderScreen(permissionArgs, state)
+              scheduleRender()
             }
             return
           }
@@ -1622,7 +1692,7 @@ export async function runTtyApp(args: TtyAppArgs): Promise<void> {
             const pending = state.pendingApproval
             if (pending.feedbackMode && pending.feedbackInput.length > 0) {
               pending.feedbackInput = pending.feedbackInput.slice(0, -1)
-              renderScreen(permissionArgs, state)
+              scheduleRender()
             }
             return
           }
@@ -1638,21 +1708,21 @@ export async function runTtyApp(args: TtyAppArgs): Promise<void> {
                 if (matched.decision === 'deny_with_feedback') {
                   pending.feedbackMode = true
                   pending.feedbackInput = ''
-                  renderScreen(permissionArgs, state)
+                  scheduleRender()
                   return
                 }
 
                 state.pendingApproval = null
-                state.status = null
+                setStatus(state, null)
                 pending.resolve({ decision: matched.decision })
-                renderScreen(permissionArgs, state)
+                scheduleRender()
                 return
               }
             }
 
             if (pending.feedbackMode) {
               pending.feedbackInput += event.text
-              renderScreen(permissionArgs, state)
+              scheduleRender()
             }
             return
           }
@@ -1662,12 +1732,12 @@ export async function runTtyApp(args: TtyAppArgs): Promise<void> {
             if (pending.feedbackMode) {
               const feedback = pending.feedbackInput.trim()
               state.pendingApproval = null
-              state.status = null
+              setStatus(state, null)
               pending.resolve({
                 decision: 'deny_with_feedback',
                 feedback,
               })
-              renderScreen(permissionArgs, state)
+              scheduleRender()
               return
             }
 
@@ -1685,14 +1755,14 @@ export async function runTtyApp(args: TtyAppArgs): Promise<void> {
             if (selected.decision === 'deny_with_feedback') {
               pending.feedbackMode = true
               pending.feedbackInput = ''
-              renderScreen(permissionArgs, state)
+              scheduleRender()
               return
             }
 
             state.pendingApproval = null
-            state.status = null
+            setStatus(state, null)
             pending.resolve({ decision: selected.decision })
-            renderScreen(permissionArgs, state)
+            scheduleRender()
             return
           }
 
@@ -1701,14 +1771,14 @@ export async function runTtyApp(args: TtyAppArgs): Promise<void> {
             if (pending.feedbackMode) {
               pending.feedbackMode = false
               pending.feedbackInput = ''
-              renderScreen(permissionArgs, state)
+              scheduleRender()
               return
             }
 
             state.pendingApproval = null
-            state.status = null
+            setStatus(state, null)
             pending.resolve({ decision: 'deny_once' })
-            renderScreen(permissionArgs, state)
+            scheduleRender()
             return
           }
 
@@ -1719,8 +1789,8 @@ export async function runTtyApp(args: TtyAppArgs): Promise<void> {
           if (event.kind === 'text' && event.ctrl && event.text === 'c') {
             state.sessionPicker.resolve(null)
             state.sessionPicker = null
-            state.status = null
-            renderScreen(permissionArgs, state)
+            setStatus(state, null)
+            scheduleRender()
             return
           }
 
@@ -1729,7 +1799,7 @@ export async function runTtyApp(args: TtyAppArgs): Promise<void> {
             if (event.kind === 'key' && event.name === 'up') {
               if (state.sessionPicker.projectSelectedIndex > 0) {
                 state.sessionPicker.projectSelectedIndex -= 1
-                renderScreen(permissionArgs, state)
+                scheduleRender()
               }
               return
             }
@@ -1737,7 +1807,7 @@ export async function runTtyApp(args: TtyAppArgs): Promise<void> {
             if (event.kind === 'key' && event.name === 'down') {
               if (state.sessionPicker.projectSelectedIndex < state.sessionPicker.projects.length - 1) {
                 state.sessionPicker.projectSelectedIndex += 1
-                renderScreen(permissionArgs, state)
+                scheduleRender()
               }
               return
             }
@@ -1746,19 +1816,19 @@ export async function runTtyApp(args: TtyAppArgs): Promise<void> {
               const proj = state.sessionPicker.projects[state.sessionPicker.projectSelectedIndex]
               if (proj && proj.sessionCount > 0) {
                 state.sessionPicker = null
-                state.status = null
+                setStatus(state, null)
                 pushTranscriptEntry(state, {
                   kind: 'assistant',
                   body: `Project "${proj.dir}" has ${proj.sessionCount} session(s). Switch to it by exiting and running:\n\n  cd <project-path> && minicode --resume`,
                 })
-                renderScreen(permissionArgs, state)
+                scheduleRender()
               }
               return
             }
 
             if ((event.kind === 'key' && event.name === 'tab') || (event.kind === 'key' && event.name === 'escape')) {
               state.sessionPicker.allProjects = false
-              renderScreen(permissionArgs, state)
+              scheduleRender()
               return
             }
 
@@ -1771,7 +1841,7 @@ export async function runTtyApp(args: TtyAppArgs): Promise<void> {
             if (picker.selectedIndex > 0) {
               picker.selectedIndex -= 1
               picker.deleteConfirmIndex = null
-              renderScreen(permissionArgs, state)
+              scheduleRender()
             }
             return
           }
@@ -1781,7 +1851,7 @@ export async function runTtyApp(args: TtyAppArgs): Promise<void> {
             if (picker.selectedIndex < picker.sessions.length - 1) {
               picker.selectedIndex += 1
               picker.deleteConfirmIndex = null
-              renderScreen(permissionArgs, state)
+              scheduleRender()
             }
             return
           }
@@ -1791,9 +1861,9 @@ export async function runTtyApp(args: TtyAppArgs): Promise<void> {
             const selected = picker.sessions[picker.selectedIndex]
             const id = selected?.id ?? null
             state.sessionPicker = null
-            state.status = null
+            setStatus(state, null)
             picker.resolve(id)
-            renderScreen(permissionArgs, state)
+            scheduleRender()
             return
           }
 
@@ -1809,8 +1879,8 @@ export async function runTtyApp(args: TtyAppArgs): Promise<void> {
                 if (sessions.length === 0) {
                   state.sessionPicker.resolve(null)
                   state.sessionPicker = null
-                  state.status = null
-                  renderScreen(permissionArgs, state)
+                  setStatus(state, null)
+                  scheduleRender()
                   return
                 }
                 picker.sessions = sessions
@@ -1820,7 +1890,7 @@ export async function runTtyApp(args: TtyAppArgs): Promise<void> {
             } else {
               picker.deleteConfirmIndex = picker.selectedIndex
             }
-            renderScreen(permissionArgs, state)
+            scheduleRender()
             return
           }
 
@@ -1829,15 +1899,15 @@ export async function runTtyApp(args: TtyAppArgs): Promise<void> {
             state.sessionPicker.allProjects = true
             state.sessionPicker.projects = await listAllProjects()
             state.sessionPicker.projectSelectedIndex = 0
-            renderScreen(permissionArgs, state)
+            scheduleRender()
             return
           }
 
           if (event.kind === 'key' && event.name === 'escape') {
             state.sessionPicker.resolve(null)
             state.sessionPicker = null
-            state.status = null
-            renderScreen(permissionArgs, state)
+            setStatus(state, null)
+            scheduleRender()
             return
           }
 
@@ -1857,7 +1927,7 @@ export async function runTtyApp(args: TtyAppArgs): Promise<void> {
               ? scrollTranscriptBy(permissionArgs, state, 3)
               : scrollTranscriptBy(permissionArgs, state, -3)
           ) {
-            renderScreen(permissionArgs, state)
+            scheduleRender()
           }
           return
         }
@@ -1876,7 +1946,7 @@ export async function runTtyApp(args: TtyAppArgs): Promise<void> {
           if (event.action === 'press' && event.button === 'left') {
             state.mouseDown = { x: col, y: lineIndex }
             state.selection = null
-            renderScreen(permissionArgs, state)
+            scheduleRender()
             return
           }
 
@@ -1902,7 +1972,7 @@ export async function runTtyApp(args: TtyAppArgs): Promise<void> {
               endLine,
               endCol,
             }
-            renderScreen(permissionArgs, state)
+            scheduleRender()
             return
           }
 
@@ -1915,7 +1985,7 @@ export async function runTtyApp(args: TtyAppArgs): Promise<void> {
             }
             state.mouseDown = null
             state.selection = keepSelectionAfterMouseRelease(state.selection)
-            renderScreen(permissionArgs, state)
+            scheduleRender()
             return
           }
 
@@ -1925,10 +1995,13 @@ export async function runTtyApp(args: TtyAppArgs): Promise<void> {
 
         if (event.kind === 'key' && event.name === 'return') {
           if (state.isBusy) {
-            state.status = state.activeTool
-              ? `Running ${state.activeTool}...`
-              : 'Current turn is still running...'
-            renderScreen(permissionArgs, state)
+            setStatus(
+              state,
+              state.activeTool
+                ? `Running ${state.activeTool}...`
+                : 'Current turn is still running...',
+            )
+            scheduleRender()
             return
           }
 
@@ -1941,7 +2014,7 @@ export async function runTtyApp(args: TtyAppArgs): Promise<void> {
               state.input = selected.usage
               state.cursorOffset = state.input.length
               state.selectedSlashIndex = 0
-              renderScreen(permissionArgs, state)
+              scheduleRender()
               return
             }
           }
@@ -1950,7 +2023,7 @@ export async function runTtyApp(args: TtyAppArgs): Promise<void> {
           state.input = ''
           state.cursorOffset = 0
           state.selectedSlashIndex = 0
-          renderScreen(permissionArgs, state)
+          scheduleRender()
           if (submitInFlight) {
             return
           }
@@ -1960,14 +2033,14 @@ export async function runTtyApp(args: TtyAppArgs): Promise<void> {
               const shouldExit = await handleInput(
                 permissionArgs,
                 state,
-                () => renderScreen(permissionArgs, state),
+                scheduleRender,
                 submittedInput,
               )
               if (shouldExit) {
                 finish()
                 return
               }
-              renderScreen(permissionArgs, state)
+              scheduleRender()
             } catch (error) {
               pushTranscriptEntry(state, {
                 kind: 'assistant',
@@ -1976,8 +2049,8 @@ export async function runTtyApp(args: TtyAppArgs): Promise<void> {
               state.input = ''
               state.cursorOffset = 0
               state.selectedSlashIndex = 0
-              state.status = null
-              renderScreen(permissionArgs, state)
+              setStatus(state, null)
+              scheduleRender()
             } finally {
               submitInFlight = false
             }
@@ -1993,7 +2066,7 @@ export async function runTtyApp(args: TtyAppArgs): Promise<void> {
             state.cursorOffset -= 1
           }
           state.selectedSlashIndex = 0
-          renderScreen(permissionArgs, state)
+          scheduleRender()
           return
         }
 
@@ -2002,7 +2075,7 @@ export async function runTtyApp(args: TtyAppArgs): Promise<void> {
             state.input.slice(0, state.cursorOffset) +
             state.input.slice(state.cursorOffset + 1)
           state.selectedSlashIndex = 0
-          renderScreen(permissionArgs, state)
+          scheduleRender()
           return
         }
 
@@ -2016,7 +2089,7 @@ export async function runTtyApp(args: TtyAppArgs): Promise<void> {
               state.input = selected.usage
               state.cursorOffset = state.input.length
               state.selectedSlashIndex = 0
-              renderScreen(permissionArgs, state)
+              scheduleRender()
             }
           }
           return
@@ -2024,14 +2097,14 @@ export async function runTtyApp(args: TtyAppArgs): Promise<void> {
 
         if (event.kind === 'text' && event.ctrl && event.text === 'p') {
           if (historyUp(state)) {
-            renderScreen(permissionArgs, state)
+            scheduleRender()
           }
           return
         }
 
         if (event.kind === 'text' && event.ctrl && event.text === 'n') {
           if (historyDown(state)) {
-            renderScreen(permissionArgs, state)
+            scheduleRender()
           }
           return
         }
@@ -2041,13 +2114,13 @@ export async function runTtyApp(args: TtyAppArgs): Promise<void> {
             state.selectedSlashIndex =
               (state.selectedSlashIndex - 1 + visibleCommands.length) %
               visibleCommands.length
-            renderScreen(permissionArgs, state)
+            scheduleRender()
           } else if (event.meta) {
             if (scrollTranscriptBy(permissionArgs, state, 1)) {
-              renderScreen(permissionArgs, state)
+              scheduleRender()
             }
           } else if (historyUp(state)) {
-            renderScreen(permissionArgs, state)
+            scheduleRender()
           }
           return
         }
@@ -2056,40 +2129,40 @@ export async function runTtyApp(args: TtyAppArgs): Promise<void> {
           if (visibleCommands.length > 0) {
             state.selectedSlashIndex =
               (state.selectedSlashIndex + 1) % visibleCommands.length
-              renderScreen(permissionArgs, state)
+              scheduleRender()
           } else if (event.meta) {
             if (scrollTranscriptBy(permissionArgs, state, -1)) {
-              renderScreen(permissionArgs, state)
+              scheduleRender()
             }
           } else if (historyDown(state)) {
-            renderScreen(permissionArgs, state)
+            scheduleRender()
           }
           return
         }
 
         if (event.kind === 'key' && event.name === 'pageup') {
           if (scrollTranscriptBy(permissionArgs, state, 8)) {
-            renderScreen(permissionArgs, state)
+            scheduleRender()
           }
           return
         }
 
         if (event.kind === 'key' && event.name === 'pagedown') {
           if (scrollTranscriptBy(permissionArgs, state, -8)) {
-            renderScreen(permissionArgs, state)
+            scheduleRender()
           }
           return
         }
 
         if (event.kind === 'key' && event.name === 'left') {
           state.cursorOffset = Math.max(0, state.cursorOffset - 1)
-          renderScreen(permissionArgs, state)
+          scheduleRender()
           return
         }
 
         if (event.kind === 'key' && event.name === 'right') {
           state.cursorOffset = Math.min(state.input.length, state.cursorOffset + 1)
-          renderScreen(permissionArgs, state)
+          scheduleRender()
           return
         }
 
@@ -2097,33 +2170,33 @@ export async function runTtyApp(args: TtyAppArgs): Promise<void> {
           state.input = ''
           state.cursorOffset = 0
           state.selectedSlashIndex = 0
-          renderScreen(permissionArgs, state)
+          scheduleRender()
           return
         }
 
         if (event.kind === 'text' && event.ctrl && event.text === 'a') {
           if (!state.input) {
             if (jumpTranscriptToEdge(permissionArgs, state, 'top')) {
-              renderScreen(permissionArgs, state)
+              scheduleRender()
             }
             return
           }
 
           state.cursorOffset = 0
-          renderScreen(permissionArgs, state)
+          scheduleRender()
           return
         }
 
         if (event.kind === 'text' && event.ctrl && event.text === 'e') {
           if (!state.input) {
             if (jumpTranscriptToEdge(permissionArgs, state, 'bottom')) {
-              renderScreen(permissionArgs, state)
+              scheduleRender()
             }
             return
           }
 
           state.cursorOffset = state.input.length
-          renderScreen(permissionArgs, state)
+          scheduleRender()
           return
         }
 
@@ -2131,7 +2204,7 @@ export async function runTtyApp(args: TtyAppArgs): Promise<void> {
           state.input = ''
           state.cursorOffset = 0
           state.selectedSlashIndex = 0
-          renderScreen(permissionArgs, state)
+          scheduleRender()
           return
         }
 
@@ -2143,7 +2216,7 @@ export async function runTtyApp(args: TtyAppArgs): Promise<void> {
           state.cursorOffset += event.text.length
           state.selectedSlashIndex = 0
           state.historyIndex = state.history.length
-          renderScreen(permissionArgs, state)
+          scheduleRender()
         }
       } catch (error) {
         pushTranscriptEntry(state, {
@@ -2153,8 +2226,8 @@ export async function runTtyApp(args: TtyAppArgs): Promise<void> {
         state.input = ''
         state.cursorOffset = 0
         state.selectedSlashIndex = 0
-        state.status = null
-        renderScreen(permissionArgs, state)
+        setStatus(state, null)
+        scheduleRender()
       }
     }
 
@@ -2173,8 +2246,8 @@ export async function runTtyApp(args: TtyAppArgs): Promise<void> {
         state.input = ''
         state.cursorOffset = 0
         state.selectedSlashIndex = 0
-        state.status = null
-        renderScreen(permissionArgs, state)
+        setStatus(state, null)
+        scheduleRender()
       })
     }
 
@@ -2194,14 +2267,14 @@ export async function runTtyApp(args: TtyAppArgs): Promise<void> {
           const shouldExit = await handleInput(
             permissionArgs,
             state,
-            () => renderScreen(permissionArgs, state),
+            scheduleRender,
             input,
           )
           if (shouldExit) {
             finish()
             return
           }
-          renderScreen(permissionArgs, state)
+          scheduleRender()
         } catch (error) {
           pushTranscriptEntry(state, {
             kind: 'assistant',
@@ -2210,8 +2283,8 @@ export async function runTtyApp(args: TtyAppArgs): Promise<void> {
           state.input = ''
           state.cursorOffset = 0
           state.selectedSlashIndex = 0
-          state.status = null
-          renderScreen(permissionArgs, state)
+          setStatus(state, null)
+          scheduleRender()
         } finally {
           submitInFlight = false
         }
