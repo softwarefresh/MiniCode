@@ -297,13 +297,7 @@ export function renderBanner(
   ]
   const metaLine = joinSegmentsWithinWidth(metaBadges, '  ', panelInner)
 
-  return renderPanel(
-    'MiniCode',
-    metaLine,
-    {
-      rightTitle: provider,
-    },
-  )
+  return renderPanel('MiniCode', metaLine)
 }
 
 export function renderPermissionSummaryLine(permissionSummary: string[]): string {
