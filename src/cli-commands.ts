@@ -164,11 +164,26 @@ export function findMatchingSlashCommands(input: string): string[] {
     .filter(command => command.startsWith(input))
 }
 
+function formatPermissionSummary(permissionSummary: string[] = []): string {
+  const findValue = (label: string): string => {
+    const raw = permissionSummary.find(part => part.startsWith(`${label}: `))
+    return raw?.slice(label.length + 2).trim() || 'none'
+  }
+
+  return [
+    `permission store: ${MINI_CODE_PERMISSIONS_PATH}`,
+    `cwd: ${findValue('cwd')}`,
+    `extra allowed dirs: ${findValue('extra allowed dirs')}`,
+    `dangerous allowlist: ${findValue('dangerous allowlist')}`,
+  ].join('\n')
+}
+
 export async function tryHandleLocalCommand(
   input: string,
   context?: {
     cwd?: string
     tools?: ToolRegistry
+    permissionSummary?: string[]
   },
 ): Promise<string | null> {
   const cwd = context?.cwd ?? process.cwd()
@@ -191,7 +206,7 @@ export async function tryHandleLocalCommand(
   }
 
   if (input === '/permissions') {
-    return `permission store: ${MINI_CODE_PERMISSIONS_PATH}`
+    return formatPermissionSummary(context?.permissionSummary)
   }
 
   if (input === '/skills') {

@@ -119,7 +119,7 @@ export async function runAgentTurn(args: {
   modelName?: string
   onToolStart?: (toolName: string, input: unknown) => void
   onToolResult?: (toolName: string, output: string, isError: boolean) => void
-  onAssistantMessage?: (content: string) => void
+  onAssistantMessage?: (content: string, metadata?: { final?: boolean }) => void
   onProgressMessage?: (content: string) => void
   onAutoCompact?: (result: CompressionResult) => void | Promise<void>
   onSnipCompact?: (result: SnipCompactResult) => void | Promise<void>
@@ -312,7 +312,7 @@ export async function runAgentTurn(args: {
               : `工具执行后模型返回空响应，已停止当前回合。请重试，或要求模型继续完成剩余步骤。${diagnosticsSuffix}`
             : `模型返回空响应，已停止当前回合。请重试，或要求模型继续。${diagnosticsSuffix}`
 
-        args.onAssistantMessage?.(fallbackContent)
+        args.onAssistantMessage?.(fallbackContent, { final: true })
         appendThinkingBlocks(next.thinkingBlocks)
         return [
           ...messages,
@@ -334,7 +334,7 @@ export async function runAgentTurn(args: {
       ]
 
       if (!isEmpty) {
-        args.onAssistantMessage?.(next.content)
+        args.onAssistantMessage?.(next.content, { final: true })
       }
 
       return withAssistant
@@ -353,7 +353,10 @@ export async function runAgentTurn(args: {
           'Continue immediately from your <progress> update with concrete tool calls, code changes, or an explicit <final> answer only if the task is complete.',
         )
       } else {
-        args.onAssistantMessage?.(next.content)
+        args.onAssistantMessage?.(
+          next.content,
+          (next.calls?.length ?? 0) > 0 ? undefined : { final: true },
+        )
         messages = [
           ...messages,
           withProviderUsage(
@@ -451,7 +454,7 @@ export async function runAgentTurn(args: {
   }
 
   const maxStepContent = `达到最大工具步数限制，已停止当前回合。`
-  args.onAssistantMessage?.(maxStepContent)
+  args.onAssistantMessage?.(maxStepContent, { final: true })
   return [
     ...messages,
     {

@@ -209,7 +209,11 @@ async function main(): Promise<void> {
           continue
         }
 
-        const localCommandResult = await tryHandleLocalCommand(input, { cwd, tools })
+        const localCommandResult = await tryHandleLocalCommand(input, {
+          cwd,
+          tools,
+          permissionSummary: permissions.getSummary(),
+        })
         if (localCommandResult !== null) {
           console.log(`\n${localCommandResult}\n`)
           continue
